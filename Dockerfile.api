@@ -1,0 +1,2 @@
+FROM vokx-api:latest
+CMD ["/home/rust/src/target/release/revolt-delta"]
