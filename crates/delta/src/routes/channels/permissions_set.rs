@@ -1,5 +1,5 @@
 use revolt_database::{
-    util::{permissions::DatabasePermissionQuery, reference::Reference}, voice::{sync_voice_permissions, VoiceClient}, Database, User
+    util::{permissions::DatabasePermissionQuery, reference::Reference}, voice::{sync_voice_permissions, VoiceClient}, Database, Server, User
 };
 use revolt_models::v0;
 use revolt_permissions::{calculate_channel_permissions, ChannelPermission, Override};
@@ -10,7 +10,7 @@ use rocket::{serde::json::Json, State};
 ///
 /// Sets permissions for the specified role in this channel.
 ///
-/// Channel must be a `TextChannel`.
+/// Channel must be a `TextChannel` or `VoiceChannel`.
 #[openapi(tag = "Channel Permissions")]
 #[put("/<target>/permissions/<role_id>", data = "<data>", rank = 2)]
 pub async fn set_role_permissions(
@@ -22,12 +22,28 @@ pub async fn set_role_permissions(
     data: Json<v0::DataSetRolePermissions>,
 ) -> Result<Json<v0::Channel>> {
     let channel = target.as_channel(db).await?;
-    let mut query = DatabasePermissionQuery::new(db, &user).channel(&channel);
-    let permissions: revolt_permissions::PermissionValue = calculate_channel_permissions(&mut query).await;
+
+    // Load the server this channel belongs to (required for role permission management)
+    let server_opt: Option<Server> = match channel.server() {
+        Some(server_id) => Some(Reference::from_unchecked(server_id).as_server(db).await?),
+        None => None,
+    };
+
+    let mut query = {
+        let q = DatabasePermissionQuery::new(db, &user).channel(&channel);
+        if let Some(ref server) = server_opt {
+            q.server(server)
+        } else {
+            q
+        }
+    };
+
+    let permissions: revolt_permissions::PermissionValue =
+        calculate_channel_permissions(&mut query).await;
 
     permissions.throw_if_lacking_channel_permission(ChannelPermission::ManagePermissions)?;
 
-    if let Some(server) = query.server_ref() {
+    if let Some(server) = server_opt.as_ref() {
         if let Some(role) = server.roles.get(&role_id) {
             if role.rank <= query.get_member_rank().unwrap_or(i64::MIN) {
                 return Err(create_error!(NotElevated));
@@ -44,7 +60,8 @@ pub async fn set_role_permissions(
                 .set_role_permission(db, &role_id, data.permissions.clone().into())
                 .await?;
 
-            sync_voice_permissions(db, voice_client, &new_channel, Some(server), Some(&role_id)).await?;
+            sync_voice_permissions(db, voice_client, &new_channel, Some(server), Some(&role_id))
+                .await?;
 
             Ok(Json(new_channel.into()))
         } else {
